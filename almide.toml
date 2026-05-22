@@ -1,0 +1,6 @@
+[package]
+name = "mc_world"
+version = "0.1.0"
+
+[dependencies]
+mc_chunk = { git = "https://github.com/almd-mc/mc-chunk" }
