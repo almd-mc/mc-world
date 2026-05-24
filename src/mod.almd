@@ -1,97 +1,221 @@
-import mc_chunk as chunk
-
-// Minecraft World: manages loaded chunk columns.
+// Minecraft world state for 1.21.1.
+// Combines chunk tracking with world-level queries.
+// Corresponds to PrismarineJS/prismarine-world.
 //
 // Usage:
-//   import mc_world as world
-//   var w = world.new(-64)
-//   w = world.load_chunk(w, 0, 0, chunk_data, 24)!
-//   let state_id = world.get_block(w, 10, 64, 20)
+//   import mc_world
+//   var world = mc_world.new_world()
+//   world = mc_world.set_block(world, 10, 64, -20, 1)
+//   let id = mc_world.get_block(world, 10, 64, -20)
+
+// --- Constants ---
+
+let CHUNK_SIZE = 16
+let MIN_Y = -64
+let MAX_Y = 319
+let SECTIONS_PER_CHUNK = 24
+
+// --- Types ---
+
+type BlockPos = { x: Int, y: Int, z: Int }
+
+type ChunkPos = { x: Int, z: Int }
+
+type Section = {
+  palette: List[Int],
+  blocks: List[Int],
+}
+
+type Chunk = {
+  pos: ChunkPos,
+  sections: List[Section],
+}
 
 type World = {
-  chunks: Map[String, chunk.ChunkColumn],
-  min_y: Int,
+  chunks: List[Chunk],
+  spawn: BlockPos,
+  dimension: String,
+  difficulty: Int,
+  game_mode: Int,
 }
 
-fn new(min_y: Int) -> World = { chunks: map.new(), min_y: min_y }
+// --- World ---
 
-fn chunk_key(cx: Int, cz: Int) -> String = "${int.to_string(cx)},${int.to_string(cz)}"
-
-effect fn load_chunk(w: World, cx: Int, cz: Int, data: Bytes, num_sections: Int) -> World = {
-  var col = chunk.parse_column(data, num_sections)!
-  let col_final = { ...col, x: cx, z: cz, min_y: w.min_y }
-  { ...w, chunks: map.set(w.chunks, chunk_key(cx, cz), col_final) }
+fn new_world() -> World = {
+  { chunks: [], spawn: { x: 0, y: 64, z: 0 }, dimension: "minecraft:overworld", difficulty: 2, game_mode: 0 }
 }
 
-fn unload_chunk(w: World, cx: Int, cz: Int) -> World =
-  { ...w, chunks: map.remove(w.chunks, chunk_key(cx, cz)) }
+fn block_to_chunk(x: Int, z: Int) -> ChunkPos = {
+  let cx = if x >= 0 then x / CHUNK_SIZE else (x + 1) / CHUNK_SIZE - 1
+  let cz = if z >= 0 then z / CHUNK_SIZE else (z + 1) / CHUNK_SIZE - 1
+  { x: cx, z: cz }
+}
 
-fn get_chunk(w: World, cx: Int, cz: Int) -> Option[chunk.ChunkColumn] =
-  map.get(w.chunks, chunk_key(cx, cz))
+fn section_index(y: Int) -> Int =
+  (y - MIN_Y) / 16
 
-fn get_block(w: World, x: Int, y: Int, z: Int) -> Int = {
-  let cx = if x >= 0 then x / 16 else (x + 1) / 16 - 1
-  let cz = if z >= 0 then z / 16 else (z + 1) / 16 - 1
-  let local_x = ((x % 16) + 16) % 16
-  let local_z = ((z % 16) + 16) % 16
-  match get_chunk(w, cx, cz) {
-    some(col) => chunk.get_block(col, local_x, y, local_z),
+// --- Section ---
+
+fn new_section() -> Section =
+  { palette: [0], blocks: list.repeat(0, 4096) }
+
+fn section_get(s: Section, x: Int, y: Int, z: Int) -> Int = {
+  let idx = y * 256 + z * 16 + x
+  let pi = list.get(s.blocks, idx) ?? 0
+  list.get(s.palette, pi) ?? 0
+}
+
+fn section_set(s: Section, x: Int, y: Int, z: Int, block_id: Int) -> Section = {
+  let idx = y * 256 + z * 16 + x
+  // Find or add palette entry
+  var pi = -1
+  for i in 0..list.length(s.palette) {
+    if (list.get(s.palette, i) ?? -1) == block_id then { pi = i } else { () }
+  }
+  let new_palette = if pi >= 0 then s.palette else s.palette + [block_id]
+  let final_pi = if pi >= 0 then pi else list.length(s.palette)
+  { palette: new_palette, blocks: list.set(s.blocks, idx, final_pi) }
+}
+
+// --- Chunk ops ---
+
+fn get_chunk(world: World, cx: Int, cz: Int) -> Option[Chunk] = {
+  var found: Option[Chunk] = none
+  for c in world.chunks {
+    if c.pos.x == cx and c.pos.z == cz then { found = some(c) } else { () }
+  }
+  found
+}
+
+fn load_chunk(world: World, cx: Int, cz: Int) -> World = {
+  let existing = get_chunk(world, cx, cz)
+  match existing {
+    some(_) => world,
+    none => {
+      let chunk: Chunk = { pos: { x: cx, z: cz }, sections: list.repeat(new_section(), SECTIONS_PER_CHUNK) }
+      { ...world, chunks: world.chunks + [chunk] }
+    },
+  }
+}
+
+fn unload_chunk(world: World, cx: Int, cz: Int) -> World =
+  { ...world, chunks: list.filter(world.chunks, (c) => not (c.pos.x == cx and c.pos.z == cz)) }
+
+fn loaded_chunks(world: World) -> Int = list.length(world.chunks)
+
+// --- Block access ---
+
+fn get_block(world: World, x: Int, y: Int, z: Int) -> Int = {
+  let cp = block_to_chunk(x, z)
+  match get_chunk(world, cp.x, cp.z) {
+    some(chunk) => {
+      let si = section_index(y)
+      let section = list.get(chunk.sections, si) ?? new_section()
+      let lx = ((x % 16) + 16) % 16
+      let ly = ((y % 16) + 16) % 16
+      let lz = ((z % 16) + 16) % 16
+      section_get(section, lx, ly, lz)
+    },
     none => 0,
   }
 }
 
-fn set_block(w: World, x: Int, y: Int, z: Int, state_id: Int) -> World = {
-  let cx = if x >= 0 then x / 16 else (x + 1) / 16 - 1
-  let cz = if z >= 0 then z / 16 else (z + 1) / 16 - 1
-  let local_x = ((x % 16) + 16) % 16
-  let local_z = ((z % 16) + 16) % 16
-  match get_chunk(w, cx, cz) {
-    some(col) => {
-      let new_col = chunk.set_block(col, local_x, y, local_z, state_id)
-      { ...w, chunks: map.set(w.chunks, chunk_key(cx, cz), new_col) }
-    },
-    none => w,
-  }
+fn set_block(world: World, x: Int, y: Int, z: Int, block_id: Int) -> World = {
+  let cp = block_to_chunk(x, z)
+  let w = load_chunk(world, cp.x, cp.z)
+  let chunk = get_chunk(w, cp.x, cp.z) ?? { pos: cp, sections: list.repeat(new_section(), SECTIONS_PER_CHUNK) }
+  let si = section_index(y)
+  let section = list.get(chunk.sections, si) ?? new_section()
+  let lx = ((x % 16) + 16) % 16
+  let ly = ((y % 16) + 16) % 16
+  let lz = ((z % 16) + 16) % 16
+  let new_section = section_set(section, lx, ly, lz, block_id)
+  let new_chunk: Chunk = { ...chunk, sections: list.set(chunk.sections, si, new_section) }
+  let filtered = list.filter(w.chunks, (c) => not (c.pos.x == cp.x and c.pos.z == cp.z))
+  { ...w, chunks: filtered + [new_chunk] }
 }
 
-fn loaded_chunks(w: World) -> List[String] = map.keys(w.chunks)
-fn chunk_count(w: World) -> Int = list.len(map.keys(w.chunks))
+// --- Queries ---
 
-// ── Tests ───────────────────────────────────────
+fn is_loaded(world: World, x: Int, z: Int) -> Bool = {
+  let cp = block_to_chunk(x, z)
+  get_chunk(world, cp.x, cp.z) != none
+}
+
+fn is_solid(world: World, x: Int, y: Int, z: Int) -> Bool = {
+  let id = get_block(world, x, y, z)
+  id != 0 and id != 33 and id != 34
+}
+
+
+// --- Tests ---
 
 test "new world" {
-  let w = new(-64)
-  assert_eq(chunk_count(w), 0)
+  let w = new_world()
+  assert_eq(loaded_chunks(w), 0)
+  assert_eq(w.dimension, "minecraft:overworld")
 }
 
-test "load and get chunk" {
-  var w = new(-64)
-  let col = chunk.empty_column(24)
-  w = { ...w, chunks: map.set(w.chunks, chunk_key(0, 0), { ...col, min_y: -64 }) }
-  assert_eq(chunk_count(w), 1)
-  match get_chunk(w, 0, 0) {
-    some(_) => assert(true),
-    none => assert(false),
-  }
+test "block_to_chunk" where [
+  "origin"    [x = 0, z = 0, cx = 0, cz = 0],
+  "positive"  [x = 17, z = 33, cx = 1, cz = 2],
+  "negative"  [x = -1, z = -17, cx = -1, cz = -2],
+  "boundary"  [x = 16, z = 0, cx = 1, cz = 0],
+] {
+  let cp = block_to_chunk(x, z)
+  assert_eq(cp.x, cx)
+  assert_eq(cp.z, cz)
 }
 
-test "unload chunk" {
-  var w = new(-64)
-  let col = chunk.empty_column(24)
-  w = { ...w, chunks: map.set(w.chunks, chunk_key(0, 0), col) }
+test "load and unload" {
+  var w = new_world()
+  w = load_chunk(w, 0, 0)
+  w = load_chunk(w, 1, 0)
+  assert_eq(loaded_chunks(w), 2)
   w = unload_chunk(w, 0, 0)
-  assert_eq(chunk_count(w), 0)
+  assert_eq(loaded_chunks(w), 1)
 }
 
-test "get block from empty world returns 0" {
-  let w = new(-64)
-  assert_eq(get_block(w, 100, 64, 200), 0)
+test "set and get block" {
+  var w = new_world()
+  w = set_block(w, 10, 64, -20, 1)
+  assert_eq(get_block(w, 10, 64, -20), 1)
+  assert_eq(get_block(w, 0, 0, 0), 0)
 }
 
-test "set and get block world coords" {
-  var w = new(-64)
-  let col = chunk.empty_column(24)
-  w = { ...w, chunks: map.set(w.chunks, chunk_key(0, 0), { ...col, min_y: -64 }) }
-  w = set_block(w, 5, 64, 10, 42)
-  assert_eq(get_block(w, 5, 64, 10), 42)
+test "get block unloaded returns 0" {
+  assert_eq(get_block(new_world(), 100, 64, 100), 0)
+}
+
+test "auto load on set" {
+  var w = new_world()
+  assert_eq(loaded_chunks(w), 0)
+  w = set_block(w, 5, 70, 5, 42)
+  assert_eq(loaded_chunks(w), 1)
+}
+
+test "is_loaded" {
+  var w = load_chunk(new_world(), 0, 0)
+  assert(is_loaded(w, 0, 0))
+  assert(not is_loaded(w, 100, 100))
+}
+
+test "is_solid" {
+  var w = set_block(new_world(), 0, 64, 0, 1)
+  assert(is_solid(w, 0, 64, 0))
+  assert(not is_solid(w, 0, 65, 0))
+}
+
+test "section_index" where [
+  "bottom" [y = -64, want = 0],
+  "sea"    [y = 63, want = 7],
+  "top"    [y = 319, want = 23],
+] {
+  assert_eq(section_index(y), want)
+}
+
+test "negative coords" {
+  var w = new_world()
+  w = set_block(w, -5, -60, -10, 7)
+  assert_eq(get_block(w, -5, -60, -10), 7)
 }

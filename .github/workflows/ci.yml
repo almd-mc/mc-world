@@ -20,9 +20,8 @@ jobs:
           sudo mv almide /usr/local/bin/
           almide --version
 
-      - name: Compile
-        run: almide compile
+      - name: Check
+        run: almide check
 
       - name: Test
-        run: almide test || echo "No tests found (OK)"
-
+        run: almide test
