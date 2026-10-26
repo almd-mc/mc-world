@@ -69,7 +69,7 @@ fn section_set(s: Section, x: Int, y: Int, z: Int, block_id: Int) -> Section = {
   let idx = y * 256 + z * 16 + x
   // Find or add palette entry
   var pi = -1
-  for i in 0..list.length(s.palette) {
+  for i in 0..<list.length(s.palette) {
     if (list.get(s.palette, i) ?? -1) == block_id then { pi = i } else { () }
   }
   let new_palette = if pi >= 0 then s.palette else s.palette + [block_id]
